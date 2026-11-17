@@ -121,4 +121,4 @@ This bot needs a long-running process with persistent storage for `./auth`, so s
 
 ## License
 
-Add a license of your choice (for example MIT) before making the repository public.
+will be determined soon
