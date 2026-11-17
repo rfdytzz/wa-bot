@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# WhatsApp session credentials (NEVER commit these: they give full access to the account)
+auth/
+auth_info*/
+session/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+
+# pm2
+.pm2/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
