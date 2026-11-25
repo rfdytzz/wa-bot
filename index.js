@@ -415,7 +415,7 @@ async function startBot() {
         version,
         auth: state,
         logger,
-        browser: ['Sticker Bot', 'Chrome', '1.0.0'],
+        browser: ['BotWhatsApp @rfdytzz', 'Chrome', '1.0.0'],
         syncFullHistory: false,
     })
 
