@@ -29,6 +29,7 @@ const {
     DisconnectReason,
     downloadContentFromMessage,
     fetchLatestBaileysVersion,
+    jidNormalizedUser,
 } = lib
 
 const WSF = await import('wa-sticker-formatter')
@@ -40,6 +41,11 @@ const PACK_NAME = 'Bot Stiker'          // default pack name
 const AUTHOR_NAME = 'Dibuat dengan Baileys' // default author name
 const MAX_VIDEO_SECONDS = 10            // max video length for animated stickers
 const MAX_AGE_SECONDS = 60              // ignore old messages (e.g. right after reconnecting)
+
+// --- Anti-delete ---
+const ANTIDELETE = true                 // aktifkan/nonaktifkan fitur
+const ANTIDELETE_CACHE_MAX = 3000       // jumlah pesan yang disimpan di memori
+const ANTIDELETE_IGNORE_OWN = true      // abaikan pesan yang kamu hapus sendiri
 
 // --- AI (Gemini) ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ''
@@ -327,6 +333,78 @@ const commands = {
     help: cmdMenu,
 }
 
+// ---------- Anti-delete ----------
+
+const msgCache = new Map()        // message id -> WAMessage
+const handledRevokes = new Set()  // cegah notifikasi ganda
+
+function cacheMessage(msg) {
+    if (!msg?.key?.id || !msg.message) return
+    // jangan simpan pesan protokol (revoke, dll.)
+    if (unwrapEphemeral(msg.message)?.protocolMessage) return
+    msgCache.set(msg.key.id, msg)
+    if (msgCache.size > ANTIDELETE_CACHE_MAX) {
+        msgCache.delete(msgCache.keys().next().value) // hapus yang paling lama
+    }
+}
+
+function describeMessage(message) {
+    const m = unwrapEphemeral(message) || {}
+    const text = getText(m)
+    if (m.imageMessage) return `🖼️ Gambar${text ? ': ' + text : ''}`
+    if (m.videoMessage) return `🎥 Video${text ? ': ' + text : ''}`
+    if (m.stickerMessage) return '🏷️ Stiker'
+    if (m.audioMessage) return m.audioMessage.ptt ? '🎤 Pesan suara' : '🎵 Audio'
+    if (m.documentMessage) return `📄 Dokumen: ${m.documentMessage.fileName || ''}`
+    if (m.contactMessage) return '👤 Kontak'
+    if (m.locationMessage) return '📍 Lokasi'
+    return text || '(jenis pesan tidak dikenali)'
+}
+
+async function handleRevoke(sock, deletedId) {
+    if (!ANTIDELETE || !deletedId || handledRevokes.has(deletedId)) return
+    handledRevokes.add(deletedId)
+    if (handledRevokes.size > 1000) handledRevokes.delete(handledRevokes.values().next().value)
+
+    const original = msgCache.get(deletedId)
+    if (!original) return // pesan tidak ada di cache (masuk sebelum bot hidup)
+    if (ANTIDELETE_IGNORE_OWN && original.key.fromMe) return
+
+    const me = jidNormalizedUser(sock.user.id)
+    const chatJid = original.key.remoteJid
+    const isGroup = chatJid.endsWith('@g.us')
+    const senderJid = original.key.participant || chatJid
+    const senderNum = senderJid.split('@')[0].split(':')[0]
+
+    let chatName = 'Chat pribadi'
+    if (isGroup) {
+        try { chatName = (await sock.groupMetadata(chatJid)).subject } catch { chatName = 'Grup' }
+    }
+
+    const ts = Number(original.messageTimestamp?.low ?? original.messageTimestamp ?? 0)
+    const waktu = ts
+        ? new Date(ts * 1000).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })
+        : '-'
+
+    const info =
+        `🗑️ *Pesan Dihapus*\n\n` +
+        `👤 Pengirim: ${original.pushName || '-'} (@${senderNum})\n` +
+        `💬 Chat: ${chatName}\n` +
+        `🕒 Dikirim: ${waktu}\n` +
+        `📝 Isi: ${describeMessage(original.message)}`
+
+    try {
+        await sock.sendMessage(me, { text: info, mentions: [senderJid] })
+        // teruskan pesan aslinya (agar media ikut terkirim)
+        const m = unwrapEphemeral(original.message)
+        if (m && !getText(m) || m?.imageMessage || m?.videoMessage || m?.stickerMessage || m?.audioMessage || m?.documentMessage) {
+            await sock.sendMessage(me, { forward: original })
+        }
+    } catch (err) {
+        console.error('Gagal mengirim notifikasi anti-delete:', err?.message || err)
+    }
+}
+
 // ---------- Bot ----------
 
 async function startBot() {
@@ -364,6 +442,18 @@ async function startBot() {
                 const from = msg.key.remoteJid
                 if (!from || from === 'status@broadcast') continue
 
+                // --- Anti-delete: deteksi pesan dihapus (revoke) ---
+                const proto = unwrapEphemeral(msg.message)?.protocolMessage
+                if (proto) {
+                    if (proto.type === 0 || proto.type === 'REVOKE') {
+                        await handleRevoke(sock, proto.key?.id)
+                    }
+                    continue
+                }
+
+                // --- Anti-delete: simpan pesan ke cache ---
+                if (ANTIDELETE) cacheMessage(msg)
+
                 // Ignore old messages
                 const ts = Number(msg.messageTimestamp?.low ?? msg.messageTimestamp ?? 0)
                 if (ts && Date.now() / 1000 - ts > MAX_AGE_SECONDS) continue
@@ -379,6 +469,18 @@ async function startBot() {
                 await handler({ sock, msg, from, prefix, argText: rest.join(' ') })
             } catch (err) {
                 console.error('Error memproses pesan:', err)
+            }
+        }
+    })
+
+    // Beberapa versi Baileys mengirim penghapusan lewat messages.update
+    sock.ev.on('messages.update', async (updates) => {
+        for (const { key, update } of updates) {
+            try {
+                const isRevoke = update?.messageStubType === 1 || update?.message === null
+                if (isRevoke) await handleRevoke(sock, key?.id)
+            } catch (err) {
+                console.error('Error anti-delete (update):', err)
             }
         }
     })
